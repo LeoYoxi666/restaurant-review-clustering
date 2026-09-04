@@ -1,0 +1,26 @@
+# 原始数据与生成结果不进入版本库
+/餐馆评价数据集/*.csv
+/商品评价数据集/*.csv
+/outputs/
+/reports/*.csv
+/reports/*.json
+/reports/*.png
+/data/processed/
+
+# 仅保留在本地的协作上下文
+/AGENTS.md
+/PROJECT_CONTEXT.md
+
+# Python / Node 临时文件
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+node_modules/
+.runtime/
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

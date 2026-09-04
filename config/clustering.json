@@ -1,0 +1,39 @@
+{
+  "paths": {
+    "restaurants": "餐馆评价数据集/restaurants.csv",
+    "ratings": "餐馆评价数据集/ratings.csv",
+    "outputs": "outputs",
+    "reports": "reports",
+    "docs": "docs"
+  },
+  "chunk_size": 50000,
+  "minimum_reviews_for_clustering": 3,
+  "rating_prior_weight": 5.0,
+  "text_prior_weight": 8.0,
+  "candidate_k": [4, 5, 6, 7, 8],
+  "random_seed": 20260905,
+  "kmeans_restarts": 5,
+  "kmeans_max_iterations": 100,
+  "silhouette_sample_size": 1500,
+  "feature_weights": {
+    "overall_score": 1.2,
+    "environment_score": 1.0,
+    "flavor_score": 1.0,
+    "service_score": 1.0,
+    "environment_gap": 0.8,
+    "flavor_gap": 0.8,
+    "service_gap": 0.8,
+    "rating_volatility": 0.7,
+    "sentiment_balance": 0.8,
+    "negative_rate": 0.6,
+    "theme_taste_rate": 0.35,
+    "theme_environment_rate": 0.35,
+    "theme_service_rate": 0.35,
+    "theme_value_rate": 0.35,
+    "theme_hygiene_rate": 0.35,
+    "theme_wait_rate": 0.35,
+    "theme_portion_rate": 0.35,
+    "theme_fresh_rate": 0.35
+  }
+}
+
