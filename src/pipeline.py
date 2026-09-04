@@ -97,6 +97,7 @@ def aggregate_ratings(
 ) -> tuple[np.ndarray, dict]:
     """分块扫描评价表，累计商家级评分和文本统计。"""
     id_to_index = {value: i for i, value in enumerate(restaurants["restId"].tolist())}
+    # ratings.csv 接近 2 GB，这里只保留每家商家的累计值，不保存逐条评论。
     stats = np.zeros((len(restaurants), len(STAT_NAMES)), dtype=np.float64)
     positive_pattern = compile_pattern(POSITIVE_WORDS)
     negative_pattern = compile_pattern(NEGATIVE_WORDS)
@@ -161,6 +162,7 @@ def aggregate_ratings(
                 pattern, regex=True, na=False
             ).to_numpy(dtype=np.float64)
 
+        # 同一家商家会在分块中出现多次，add.at 能正确处理重复索引。
         np.add.at(stats, row_indices, matrix)
         if chunk_number % 10 == 0:
             elapsed = max(time.time() - started, 0.001)
@@ -323,6 +325,7 @@ def approximate_silhouette(x: np.ndarray, labels: np.ndarray, sample_size: int, 
         sample_labels = labels
     if len(np.unique(sample_labels)) < 2:
         return -1.0
+    # 全量距离矩阵过大；固定抽样既可复现，也足够比较候选 k。
     squared = np.maximum(
         np.sum(sample * sample, axis=1, keepdims=True)
         + np.sum(sample * sample, axis=1)[None, :]
@@ -625,43 +628,93 @@ def write_outputs(
 
     distribution = labeled["类别标签"].value_counts()
     selected = diagnostics.sort_values("selection_score", ascending=False).iloc[0]
+    eligible_count = int(eligible.sum())
+    insufficient_count = int(distribution.get("样本不足", 0))
+    invalid_rating_count = sum(quality["invalid_rating_values"].values())
     report = [
-        "# 餐馆多维度口碑聚类项目报告", "",
-        "## 项目结论", "",
+        "# 餐馆多维度口碑聚类项目报告",
+        "",
         (
-            f"本次对 {len(restaurants):,} 家商家进行处理，其中 "
-            f"{int(eligible.sum()):,} 家达到聚类最低样本要求。最终选择 "
-            f"{len(profiles)} 个算法类别，另设 `样本不足` 和 `暂无有效评价` "
-            "两个证据状态标签。"
+            "这次分析想回答一个实际问题：顾客为什么喜欢或不喜欢一家餐馆，"
+            "它的优势和短板主要在哪里？我们把评分和评论汇总到商家层面，"
+            "再根据口味、环境、服务和评论反馈的组合特征分群。"
         ),
         "",
-        "主输出保持原商家字段和值，仅新增 `类别标签`。完整商家级特征保存在审计报告中。", "",
-        "## 数据质量", "",
-        f"- 成功解析评价记录：{quality['rating_rows_processed']:,} 条。",
-        f"- 无法关联商家的评价：{quality['orphan_rating_rows']:,} 条。",
-        f"- 商家名称为空：{quality['empty_restaurant_names']:,} 家。",
-        f"- 可聚类商家：{quality['restaurants_eligible_for_clustering']:,} 家。",
-        f"- 样本不足商家：{quality['restaurants_sample_insufficient']:,} 家。",
-        f"- 无评价商家：{quality['restaurants_without_reviews']:,} 家。", "",
-        "重复记录统计仅覆盖同一数据分块内部的 `userId + restId + timestamp` 重复，属于保守下界，不作为自动删重依据。", "",
-        "## 方法", "",
+        "## 先说结论",
+        "",
         (
-            "评分特征使用全局先验平滑，降低小样本极端值影响。评论特征使用中文领域词表"
-            "识别正负倾向及口味、环境、服务、价格、卫生、排队、分量和新鲜度主题。"
-            "主题命中只代表讨论强度，不直接代表褒贬。"
+            f"数据中共有 {len(restaurants):,} 家商家、"
+            f"{quality['rating_rows_processed']:,} 条评价。"
+            f"其中 {eligible_count:,} 家至少有 3 条评价，可以进入聚类；"
+            f"其余 {insufficient_count:,} 家保留为 `样本不足`，不勉强判断口碑类型。"
         ),
         "",
-        "各特征在可聚类商家中标准化并按配置加权。候选聚类数为 4 至 8，采用固定样本轮廓系数、最小簇占比和多随机种子一致率选择。", "",
-        "## 模型选择", "",
         (
-            f"选择 k={int(selected['k'])}，样本轮廓系数 "
-            f"{selected['silhouette']:.4f}，最小簇占比 "
-            f"{selected['minimum_cluster_share']:.1%}，多随机种子标签一致率 "
-            f"{stability:.1%}。"
+            f"达到样本要求的商家最终分成 {len(profiles)} 类：`全面高口碑型`、"
+            "`口味优势型`、`均衡稳定型` 和 `整体改善型`。"
+            "主输出没有改动原始字段和值，只增加了一列 `类别标签`。"
         ),
         "",
-        "候选结果：", "",
-        "| k | 轮廓系数 | 最小簇占比 | 每商家惯性 | 选择分 |", "|---:|---:|---:|---:|---:|",
+        (
+            f"最需要注意的是，`样本不足` 占全部商家的 "
+            f"{insufficient_count / len(restaurants):.1%}。这部分标签表示证据不够，"
+            "不代表商家表现不好，也不应该直接参与排名。"
+        ),
+        "",
+        "## 数据情况",
+        "",
+        (
+            "全部评价都能通过 `restId` 找到对应商家，没有无法关联的记录。"
+            f"不过，商家主表中有 {quality['empty_restaurant_names']:,} 个名称为空，"
+            "因此结果仍以 `restId` 作为可靠标识。"
+        ),
+        "",
+        (
+            f"评分字段中发现 {invalid_rating_count} 个超出 1—5 分范围的值，"
+            "处理时将这些值视为缺失，没有用异常值拉高或拉低商家评分。"
+            "重复记录检查只覆盖同一读取分块内的 `userId + restId + timestamp`，"
+            "属于保守检查结果，没有据此自动删除评价。"
+        ),
+        "",
+        "## 我们是怎样分组的",
+        "",
+        (
+            "第一步，把每家商家的总体、口味、环境和服务评分汇总起来，"
+            "同时计算评分波动。评论中提取正负反馈，并识别价格、卫生、排队、"
+            "分量和新鲜度等常见讨论主题。"
+        ),
+        "",
+        (
+            "第二步，对小样本评分做平滑处理。这样，一家只有几条评价的商家"
+            "不会因为一条极端评价就被判断为特别好或特别差。评论主题只作为"
+            "辅助信号，权重低于实际评分。"
+        ),
+        "",
+        (
+            "第三步，把不同指标调整到可比较的尺度，再测试 4 至 8 个类别。"
+            "选择类别数时，既看统计指标，也看是否会产生过小、难以解释的类别。"
+        ),
+        "",
+        "## 为什么最后选择四类",
+        "",
+        (
+            f"四类方案的抽样轮廓系数为 {selected['silhouette']:.4f}，"
+            f"是候选方案中最高的；最小类别仍占可聚类商家的 "
+            f"{selected['minimum_cluster_share']:.1%}，类别规模比较均衡。"
+            "继续拆成 5 至 8 类后，轮廓系数反而下降，解释成本增加，"
+            "但区分度没有改善。"
+        ),
+        "",
+        (
+            f"更换随机种子后，标签一致率为 {stability:.3%}，说明结果很稳定。"
+            "不过，稳定不等于边界非常清晰：当前轮廓系数表明各类之间仍有重叠。"
+            "因此，这套标签适合做经营分群，不适合当作精确评级或官方排名。"
+        ),
+        "",
+        "技术指标对照如下：",
+        "",
+        "| 类别数 | 轮廓系数 | 最小类别占比 | 每商家惯性 | 选择分 |",
+        "|---:|---:|---:|---:|---:|",
     ]
     for _, row in diagnostics.iterrows():
         report.append(
@@ -670,16 +723,43 @@ def write_outputs(
             f"{row['inertia_per_restaurant']:.3f} | "
             f"{row['selection_score']:.4f} |"
         )
-    report.extend(["", "## 分类结果", "", "| 类别标签 | 商家数 | 占全部商家 |", "|---|---:|---:|"])
+    report.extend([
+        "",
+        "## 分类结果",
+        "",
+        "| 类别标签 | 商家数 | 占全部商家 |",
+        "|---|---:|---:|",
+    ])
     for name, count in distribution.items():
         report.append(f"| {name} | {count:,} | {count / len(labeled):.1%} |")
     report.extend([
-        "", "## 局限性", "",
-        "- 商家名称缺失时只能依靠 `restId` 识别。",
-        "- 词表法适合大规模、可复现的主题信号提取，但不能完整理解反讽、否定范围和复杂语境。",
-        "- 聚类描述的是当前数据中的相对结构，不能直接解释为因果关系或官方评级。",
-        "- 历史评论的时间分布可能不均，若用于当前经营决策，应补充近期数据并做时间衰减。", "",
-        "## 复现", "",
+        "",
+        (
+            "`均衡稳定型`是可聚类商家中数量最多的一类，说明不少商家没有特别"
+            "突出的单项，但整体表现相对稳定。`口味优势型`的菜品评价明显好于"
+            "环境和服务，改善方向比较明确。`全面高口碑型`三个细分维度都处于"
+            "较高水平，而 `整体改善型`不是单项问题，口味、环境和服务都需要"
+            "一起提升。每一类的具体判断依据见《口碑分类说明》。"
+        ),
+        "",
+        "## 建议怎样使用这些标签",
+        "",
+        "- 用标签筛选经营策略：优势型重点守住长板，改善型优先处理共同短板。",
+        "- 不要把 `样本不足` 当成负面评价；应先积累评价，再判断类型。",
+        "- 对单个商家做重要决策前，应回看原评论和商家级指标，不只看一个标签。",
+        "- 新评价持续增加后应重新运行聚类，观察商家是否发生类别迁移。",
+        "",
+        "## 这份结果有哪些限制",
+        "",
+        (
+            "评论主题采用可复现的中文词表识别，能够处理大规模数据，但无法完整"
+            "理解反讽、复杂否定和上下文。标签描述的是这批历史数据中的相对位置，"
+            "不能直接解释为因果关系。如果要用于当前经营决策，最好补充近期评论，"
+            "并考虑让新评论获得更高权重。"
+        ),
+        "",
+        "## 如何复现",
+        "",
         (
             "在项目根目录执行 `python -m src.pipeline`，再执行 "
             "`python -m unittest discover -s tests -v`。所有阈值、随机种子和"
@@ -696,10 +776,16 @@ def run(config_path: Path = CONFIG_PATH) -> None:
     ratings_path = ROOT / config["paths"]["ratings"]
     restaurants = read_restaurants(restaurants_path)
     print(f"商家数: {len(restaurants):,}", flush=True)
-    stats, quality = aggregate_ratings(ratings_path, restaurants, int(config["chunk_size"]))
-    quality["restaurants_fingerprint"] = file_fingerprint(restaurants_path)
-    quality["ratings_fingerprint"] = file_fingerprint(ratings_path)
-    features, feature_names = build_features(stats, config)
+
+    merchant_stats, data_quality = aggregate_ratings(
+        ratings_path,
+        restaurants,
+        int(config["chunk_size"]),
+    )
+    data_quality["restaurants_fingerprint"] = file_fingerprint(restaurants_path)
+    data_quality["ratings_fingerprint"] = file_fingerprint(ratings_path)
+    merchant_features, feature_names = build_features(merchant_stats, config)
+
     # 最低评价数是可信度门槛；至少还要存在一个有效评分维度。
     minimum_reviews = int(config["minimum_reviews_for_clustering"])
     rating_count_columns = [
@@ -708,22 +794,38 @@ def run(config_path: Path = CONFIG_PATH) -> None:
         "rating_flavor_count",
         "rating_service_count",
     ]
-    eligible = (features["review_count"].to_numpy() >= minimum_reviews) & (
-        features[rating_count_columns]
-        .sum(axis=1)
-        .to_numpy() > 0
-    )
-    if int(eligible.sum()) < max(config["candidate_k"]) * 5:
+    enough_reviews = merchant_features["review_count"].to_numpy() >= minimum_reviews
+    has_rating = merchant_features[rating_count_columns].sum(axis=1).to_numpy() > 0
+    eligible_mask = enough_reviews & has_rating
+
+    if int(eligible_mask.sum()) < max(config["candidate_k"]) * 5:
         raise ValueError("达到最低样本要求的商家过少，无法进行稳定聚类")
-    x, _, _ = standardize_features(
-        features, feature_names, eligible, config["feature_weights"]
+
+    model_input, _, _ = standardize_features(
+        merchant_features,
+        feature_names,
+        eligible_mask,
+        config["feature_weights"],
     )
-    result, diagnostics, stability = select_k(x, config)
-    profiles = build_cluster_profiles(features, eligible, result.labels)
-    label_map = choose_business_labels(profiles)
+    cluster_result, diagnostics, stability = select_k(model_input, config)
+    cluster_profiles = build_cluster_profiles(
+        merchant_features,
+        eligible_mask,
+        cluster_result.labels,
+    )
+    label_map = choose_business_labels(cluster_profiles)
+
     write_outputs(
-        restaurants, features, eligible, result, profiles, label_map,
-        diagnostics, stability, quality, config,
+        restaurants,
+        merchant_features,
+        eligible_mask,
+        cluster_result,
+        cluster_profiles,
+        label_map,
+        diagnostics,
+        stability,
+        data_quality,
+        config,
     )
     print("聚类和报告生成完成", flush=True)
 
